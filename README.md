@@ -22,6 +22,22 @@ nif-port-cli remap-textures input.nif output.nif `
   'textures\shared\old.dds' 'textures\my-overlay\unique.dds'
 ```
 
+`inspect` reports each shape's name, vertex and triangle counts, skin bones,
+and texture paths. `clone-shape` copies one unambiguous named shape and its
+dependent blocks from a donor into a separate base NIF, then reloads the
+result and verifies the cloned geometry, skin-bone list, and textures. It is
+intended for narrow compatibility overlays where an independently weighted
+decoration must be combined with an existing body refit:
+
+```powershell
+nif-port-cli clone-shape cbbe-outfit.nif vendor-outfit.nif `
+  'VendorOutfit:Fur' output.nif
+```
+
+`export-obj` creates a deterministic, geometry-only inspection export. It is
+not a game-asset converter; its purpose is static visual QA and exact geometry
+comparisons between an input and an owned overlay.
+
 ## Build
 
 Clone recursively so the GPL-3.0-licensed `nifly` dependency is checked out at

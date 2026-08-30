@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <set>
@@ -121,7 +122,37 @@ void emitInspection(const fs::path& file, const nifly::NifFile& nif) {
               << ",\"niTriShapes\":" << triShapes
               << ",\"niTriStrips\":" << triStrips
               << ",\"bsTriShapes\":" << bsTriShapes
-              << ",\"textures\":[";
+              << ",\"shapeDetails\":[";
+
+    bool firstShape = true;
+    for (auto* shape : shapes) {
+        if (!firstShape) std::cout << ',';
+        firstShape = false;
+        std::vector<std::string> bones;
+        nif.GetShapeBoneList(shape, bones);
+        std::cout << "{\"name\":\"" << jsonEscape(shape->name.get())
+                  << "\",\"vertices\":" << shape->GetNumVertices()
+                  << ",\"triangles\":" << shape->GetNumTriangles()
+                  << ",\"skinned\":" << (shape->IsSkinned() ? "true" : "false")
+                  << ",\"bones\":[";
+        bool firstBone = true;
+        for (const auto& bone : bones) {
+            if (!firstBone) std::cout << ',';
+            firstBone = false;
+            std::cout << '"' << jsonEscape(bone) << '"';
+        }
+        std::cout << "],\"textures\":[";
+        bool firstTexture = true;
+        for (std::uint32_t slot = 0; slot < 10; ++slot) {
+            std::string texture;
+            if (nif.GetTextureSlot(shape, texture, slot) == 0 || texture.empty()) continue;
+            if (!firstTexture) std::cout << ',';
+            firstTexture = false;
+            std::cout << '"' << jsonEscape(texture) << '"';
+        }
+        std::cout << "]}";
+    }
+    std::cout << "],\"textures\":[";
 
     bool first = true;
     for (const auto& texture : textures) {
@@ -130,6 +161,163 @@ void emitInspection(const fs::path& file, const nifly::NifFile& nif) {
         std::cout << '"' << jsonEscape(texture) << '"';
     }
     std::cout << "]}\n";
+}
+
+int cloneShape(const fs::path& base,
+               const fs::path& donor,
+               const std::string& shapeName,
+               const fs::path& output) {
+    if (!fs::is_regular_file(base) || !fs::is_regular_file(donor)) {
+        std::cerr << "Base and donor NIFs must both exist\n";
+        return 2;
+    }
+    if (fs::exists(output)) {
+        std::cerr << "Refusing to overwrite output: " << output << '\n';
+        return 2;
+    }
+    if (fs::absolute(base).lexically_normal() == fs::absolute(output).lexically_normal()
+        || fs::absolute(donor).lexically_normal() == fs::absolute(output).lexically_normal()) {
+        std::cerr << "Inputs and output must differ\n";
+        return 2;
+    }
+
+    nifly::NifFile target(base);
+    nifly::NifFile source(donor);
+    if (!target.IsValid() || target.HasUnknown() || !source.IsValid() || source.HasUnknown()) {
+        std::cerr << "Refusing to clone from invalid or partially understood NIFs\n";
+        return 3;
+    }
+    if (target.GetHeader().GetVersion().String() != source.GetHeader().GetVersion().String()) {
+        std::cerr << "Base and donor NIF versions differ\n";
+        return 3;
+    }
+
+    nifly::NiShape* donorShape = nullptr;
+    for (auto* shape : source.GetShapes()) {
+        if (shape->name.get() != shapeName) continue;
+        if (donorShape != nullptr) {
+            std::cerr << "Donor shape name is ambiguous: " << shapeName << '\n';
+            return 3;
+        }
+        donorShape = shape;
+    }
+    if (donorShape == nullptr) {
+        std::cerr << "Donor shape was not found: " << shapeName << '\n';
+        return 3;
+    }
+    for (auto* shape : target.GetShapes()) {
+        if (shape->name.get() == shapeName) {
+            std::cerr << "Base already contains shape: " << shapeName << '\n';
+            return 3;
+        }
+    }
+
+    const auto originalShapeCount = target.GetShapes().size();
+    std::vector<std::string> donorBones;
+    source.GetShapeBoneList(donorShape, donorBones);
+    std::vector<std::string> donorTextures;
+    for (std::uint32_t slot = 0; slot < 10; ++slot) {
+        std::string texture;
+        if (source.GetTextureSlot(donorShape, texture, slot) != 0 && !texture.empty()) {
+            donorTextures.push_back(normalizedTexturePath(texture));
+        }
+    }
+    const auto donorVertices = donorShape->GetNumVertices();
+    const auto donorTriangles = donorShape->GetNumTriangles();
+    const auto donorSkinned = donorShape->IsSkinned();
+    if (target.CloneShape(donorShape, shapeName, &source) == nullptr) {
+        std::cerr << "Shape clone failed: " << shapeName << '\n';
+        return 4;
+    }
+
+    fs::create_directories(output.parent_path());
+    if (target.Save(output) != 0) {
+        std::cerr << "Save failed: " << output << '\n';
+        return 4;
+    }
+
+    nifly::NifFile check(output);
+    nifly::NiShape* clonedShape = nullptr;
+    for (auto* shape : check.GetShapes()) {
+        if (shape->name.get() == shapeName) clonedShape = shape;
+    }
+    std::vector<std::string> clonedBones;
+    if (clonedShape != nullptr) check.GetShapeBoneList(clonedShape, clonedBones);
+    std::vector<std::string> clonedTextures;
+    if (clonedShape != nullptr) {
+        for (std::uint32_t slot = 0; slot < 10; ++slot) {
+            std::string texture;
+            if (check.GetTextureSlot(clonedShape, texture, slot) != 0 && !texture.empty()) {
+                clonedTextures.push_back(normalizedTexturePath(texture));
+            }
+        }
+    }
+    if (!check.IsValid() || check.HasUnknown() || !check.IsSSECompatible()
+        || check.GetShapes().size() != originalShapeCount + 1 || clonedShape == nullptr
+        || clonedShape->GetNumVertices() != donorVertices
+        || clonedShape->GetNumTriangles() != donorTriangles
+        || clonedShape->IsSkinned() != donorSkinned
+        || clonedBones != donorBones || clonedTextures != donorTextures) {
+        std::cerr << "Post-clone validation failed: " << output << '\n';
+        std::error_code ignored;
+        fs::remove(output, ignored);
+        return 4;
+    }
+
+    emitInspection(output, check);
+    return 0;
+}
+
+int exportObj(const fs::path& input, const fs::path& output) {
+    if (!fs::is_regular_file(input)) {
+        std::cerr << "Input NIF does not exist: " << input << '\n';
+        return 2;
+    }
+    if (fs::exists(output)) {
+        std::cerr << "Refusing to overwrite output: " << output << '\n';
+        return 2;
+    }
+    nifly::NifFile nif(input);
+    if (!nif.IsValid() || nif.HasUnknown()) {
+        std::cerr << "Refusing to export invalid or partially understood NIF: " << input << '\n';
+        return 3;
+    }
+    fs::create_directories(output.parent_path());
+    std::ofstream stream(output, std::ios::binary);
+    if (!stream) {
+        std::cerr << "Could not create OBJ: " << output << '\n';
+        return 4;
+    }
+    stream << "# nif-port-cli deterministic inspection export\n";
+    std::size_t vertexOffset = 1;
+    for (auto* shape : nif.GetShapes()) {
+        std::vector<nifly::Vector3> vertices;
+        std::vector<nifly::Triangle> triangles;
+        if (!nif.GetVertsForShape(shape, vertices) || !shape->GetTriangles(triangles)) {
+            std::cerr << "Could not read shape geometry: " << shape->name.get() << '\n';
+            return 4;
+        }
+        stream << "o " << shape->name.get() << '\n';
+        const auto transform = shape->GetTransformToParent();
+        for (const auto& vertex : vertices) {
+            const auto point = transform.ApplyTransform(vertex);
+            stream << "v " << point.x << ' ' << point.y << ' ' << point.z << '\n';
+        }
+        for (const auto& triangle : triangles) {
+            stream << "f " << vertexOffset + triangle.p1 << ' '
+                   << vertexOffset + triangle.p2 << ' '
+                   << vertexOffset + triangle.p3 << '\n';
+        }
+        vertexOffset += vertices.size();
+    }
+    if (!stream) {
+        std::cerr << "OBJ write failed: " << output << '\n';
+        return 4;
+    }
+    std::cout << "{\"input\":\"" << jsonEscape(input.generic_string())
+              << "\",\"output\":\"" << jsonEscape(output.generic_string())
+              << "\",\"shapes\":" << nif.GetShapes().size() << "}\n";
+    return 0;
 }
 
 int inspect(const fs::path& input) {
@@ -280,6 +468,8 @@ void usage() {
     std::cerr << "Usage:\n"
               << "  nif-port-cli inspect <file-or-directory>\n"
               << "  nif-port-cli convert-sse <input-file-or-directory> <output-directory>\n"
+              << "  nif-port-cli clone-shape <base-file> <donor-file> <shape-name> <output-file>\n"
+              << "  nif-port-cli export-obj <input-file> <output-file>\n"
               << "  nif-port-cli remap-textures <input-file> <output-file>"
                  " <old-path> <new-path> [<old-path> <new-path> ...]\n";
 }
@@ -295,6 +485,12 @@ int main(int argc, char** argv) {
     if (command == "inspect" && argc == 3) return inspect(fs::u8path(argv[2]));
     if (command == "convert-sse" && argc == 4) {
         return convertSse(fs::u8path(argv[2]), fs::u8path(argv[3]));
+    }
+    if (command == "clone-shape" && argc == 6) {
+        return cloneShape(fs::u8path(argv[2]), fs::u8path(argv[3]), argv[4], fs::u8path(argv[5]));
+    }
+    if (command == "export-obj" && argc == 4) {
+        return exportObj(fs::u8path(argv[2]), fs::u8path(argv[3]));
     }
     if (command == "remap-textures" && argc >= 6 && ((argc - 4) % 2) == 0) {
         std::map<std::string, std::string> replacements;
