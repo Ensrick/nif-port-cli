@@ -4,6 +4,7 @@
 #include <cctype>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -65,6 +66,14 @@ std::string cleanTexturePath(std::string value) {
         value.pop_back();
     }
     std::replace(value.begin(), value.end(), '/', '\\');
+    return value;
+}
+
+std::string normalizedTexturePath(std::string value) {
+    value = cleanTexturePath(std::move(value));
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
     return value;
 }
 
@@ -187,10 +196,92 @@ int convertSse(const fs::path& input, const fs::path& output) {
     return failures == 0 ? 0 : 4;
 }
 
+int remapTextures(const fs::path& input,
+                  const fs::path& output,
+                  const std::map<std::string, std::string>& replacements) {
+    if (!fs::is_regular_file(input)) {
+        std::cerr << "Input NIF does not exist: " << input << '\n';
+        return 2;
+    }
+    if (fs::exists(output)) {
+        std::cerr << "Refusing to overwrite output: " << output << '\n';
+        return 2;
+    }
+    if (fs::absolute(input).lexically_normal() == fs::absolute(output).lexically_normal()) {
+        std::cerr << "Input and output paths must differ\n";
+        return 2;
+    }
+
+    nifly::NifFile nif(input);
+    if (!nif.IsValid() || nif.HasUnknown()) {
+        std::cerr << "Refusing to edit invalid or partially understood NIF: " << input << '\n';
+        return 3;
+    }
+
+    std::map<std::string, std::size_t> hits;
+    for (auto* shape : nif.GetShapes()) {
+        for (std::uint32_t slot = 0; slot < 10; ++slot) {
+            std::string texture;
+            if (nif.GetTextureSlot(shape, texture, slot) == 0 || texture.empty()) continue;
+            const auto key = normalizedTexturePath(texture);
+            const auto replacement = replacements.find(key);
+            if (replacement == replacements.end()) continue;
+            nif.SetTextureSlot(shape, cleanTexturePath(replacement->second), slot);
+            ++hits[key];
+        }
+    }
+
+    for (const auto& replacement : replacements) {
+        const auto& source = replacement.first;
+        if (hits[source] == 0) {
+            std::cerr << "Requested texture path was not present: " << source << '\n';
+            return 3;
+        }
+    }
+
+    fs::create_directories(output.parent_path());
+    if (nif.Save(output) != 0) {
+        std::cerr << "Save failed: " << output << '\n';
+        return 4;
+    }
+
+    nifly::NifFile check(output);
+    if (!check.IsValid() || check.HasUnknown()
+        || check.GetHeader().GetVersion().String() != nif.GetHeader().GetVersion().String()
+        || check.GetShapes().size() != nif.GetShapes().size()) {
+        std::cerr << "Post-remap validation failed: " << output << '\n';
+        std::error_code ignored;
+        fs::remove(output, ignored);
+        return 4;
+    }
+    std::map<std::string, std::size_t> postHits;
+    for (auto* shape : check.GetShapes()) {
+        for (std::uint32_t slot = 0; slot < 10; ++slot) {
+            std::string texture;
+            if (check.GetTextureSlot(shape, texture, slot) != 0 && !texture.empty()) {
+                ++postHits[normalizedTexturePath(texture)];
+            }
+        }
+    }
+    for (const auto& [source, destination] : replacements) {
+        if (postHits[source] != 0 || postHits[normalizedTexturePath(destination)] < hits[source]) {
+            std::cerr << "Post-remap texture verification failed: " << source << '\n';
+            std::error_code ignored;
+            fs::remove(output, ignored);
+            return 4;
+        }
+    }
+
+    emitInspection(output, check);
+    return 0;
+}
+
 void usage() {
     std::cerr << "Usage:\n"
               << "  nif-port-cli inspect <file-or-directory>\n"
-              << "  nif-port-cli convert-sse <input-file-or-directory> <output-directory>\n";
+              << "  nif-port-cli convert-sse <input-file-or-directory> <output-directory>\n"
+              << "  nif-port-cli remap-textures <input-file> <output-file>"
+                 " <old-path> <new-path> [<old-path> <new-path> ...]\n";
 }
 
 } // namespace
@@ -204,6 +295,21 @@ int main(int argc, char** argv) {
     if (command == "inspect" && argc == 3) return inspect(fs::u8path(argv[2]));
     if (command == "convert-sse" && argc == 4) {
         return convertSse(fs::u8path(argv[2]), fs::u8path(argv[3]));
+    }
+    if (command == "remap-textures" && argc >= 6 && ((argc - 4) % 2) == 0) {
+        std::map<std::string, std::string> replacements;
+        for (int i = 4; i < argc; i += 2) {
+            const auto source = normalizedTexturePath(argv[i]);
+            const auto destination = cleanTexturePath(argv[i + 1]);
+            if (source.empty() || destination.empty()
+                || source == normalizedTexturePath(destination)
+                || replacements.find(source) != replacements.end()) {
+                std::cerr << "Texture source paths must be unique and destinations must differ\n";
+                return 1;
+            }
+            replacements.emplace(source, destination);
+        }
+        return remapTextures(fs::u8path(argv[2]), fs::u8path(argv[3]), replacements);
     }
     usage();
     return 1;

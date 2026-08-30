@@ -11,6 +11,17 @@ a trailing newline in a shader texture reference.
 
 The tool does not contain or redistribute mod assets.
 
+`remap-textures` writes a new NIF with selected shader texture paths changed.
+It never overwrites its input or an existing output, rejects unknown blocks,
+requires every requested source path to match, and reloads the result before
+success. This makes narrow, local-only asset overlays reproducible without
+editing an installed vendor mod in place:
+
+```powershell
+nif-port-cli remap-textures input.nif output.nif `
+  'textures\shared\old.dds' 'textures\my-overlay\unique.dds'
+```
+
 ## Build
 
 Clone recursively so the GPL-3.0-licensed `nifly` dependency is checked out at
