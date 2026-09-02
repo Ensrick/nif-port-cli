@@ -133,10 +133,24 @@ void emitInspection(const fs::path& file, const nifly::NifFile& nif) {
         firstShape = false;
         std::vector<std::string> bones;
         nif.GetShapeBoneList(shape, bones);
+        const auto* shader = dynamic_cast<const nifly::BSLightingShaderProperty*>(
+            nif.GetShader(shape));
+        const auto* bsShape = dynamic_cast<const nifly::BSTriShape*>(shape);
         std::cout << "{\"name\":\"" << jsonEscape(shape->name.get())
                   << "\",\"vertices\":" << shape->GetNumVertices()
                   << ",\"triangles\":" << shape->GetNumTriangles()
                   << ",\"skinned\":" << (shape->IsSkinned() ? "true" : "false")
+                  << ",\"shader\":";
+        if (shader == nullptr) {
+            std::cout << "null";
+        } else {
+            std::cout << "{\"type\":" << shader->GetShaderType()
+                      << ",\"flags1\":" << shader->shaderFlags1
+                      << ",\"flags2\":" << shader->shaderFlags2
+                      << '}';
+        }
+        std::cout << ",\"hasEyeData\":"
+                  << (bsShape != nullptr && bsShape->HasEyeData() ? "true" : "false")
                   << ",\"bones\":[";
         bool firstBone = true;
         for (const auto& bone : bones) {
@@ -339,7 +353,40 @@ int inspect(const fs::path& input) {
     return failures == 0 ? 0 : 3;
 }
 
-int convertSse(const fs::path& input, const fs::path& output, bool headParts) {
+std::size_t normalizeSeEyeShaders(nifly::NifFile& nif) {
+    std::size_t changes = 0;
+    for (auto* shape : nif.GetShapes()) {
+        const auto* bsShape = dynamic_cast<const nifly::BSTriShape*>(shape);
+        if (bsShape == nullptr || !bsShape->HasEyeData()) continue;
+        auto* shader = dynamic_cast<nifly::BSLightingShaderProperty*>(nif.GetShader(shape));
+        if (shader == nullptr) continue;
+        shader->SetShaderType(nifly::BSLSP_ENVMAP);
+        shader->shaderFlags1 &= ~nifly::SLSF1_EYE_ENVIRONMENT_MAPPING;
+        shader->shaderFlags1 |= nifly::SLSF1_ENVIRONMENT_MAPPING;
+        ++changes;
+    }
+    return changes;
+}
+
+bool hasExpectedSeEyeShaders(nifly::NifFile& nif) {
+    for (auto* shape : nif.GetShapes()) {
+        const auto* bsShape = dynamic_cast<const nifly::BSTriShape*>(shape);
+        if (bsShape == nullptr || !bsShape->HasEyeData()) continue;
+        const auto* shader = dynamic_cast<const nifly::BSLightingShaderProperty*>(
+            nif.GetShader(shape));
+        if (shader == nullptr || shader->GetShaderType() != nifly::BSLSP_ENVMAP
+            || (shader->shaderFlags1 & nifly::SLSF1_EYE_ENVIRONMENT_MAPPING) != 0
+            || (shader->shaderFlags1 & nifly::SLSF1_ENVIRONMENT_MAPPING) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int convertSse(const fs::path& input,
+               const fs::path& output,
+               bool headParts,
+               bool seEyeShaders) {
     const auto files = collectNifs(input);
     if (files.empty()) {
         std::cerr << "No NIF files found: " << input << '\n';
@@ -361,6 +408,7 @@ int convertSse(const fs::path& input, const fs::path& output, bool headParts) {
         options.headParts = headParts;
         const auto result = nif.OptimizeFor(options);
         sanitizeTexturePaths(nif);
+        if (seEyeShaders) normalizeSeEyeShaders(nif);
         if (result.versionMismatch) {
             std::cerr << "Unsupported source version: " << file << '\n';
             ++failures;
@@ -394,6 +442,12 @@ int convertSse(const fs::path& input, const fs::path& output, bool headParts) {
                 ++failures;
                 continue;
             }
+        }
+        if (seEyeShaders && !hasExpectedSeEyeShaders(check)) {
+            std::cerr << "SE eye-shader normalization failed validation: "
+                      << destination << '\n';
+            ++failures;
+            continue;
         }
         emitInspection(destination, check);
     }
@@ -484,7 +538,8 @@ int remapTextures(const fs::path& input,
 void usage() {
     std::cerr << "Usage:\n"
               << "  nif-port-cli inspect <file-or-directory>\n"
-              << "  nif-port-cli convert-sse [--headparts] <input-file-or-directory> <output-directory>\n"
+              << "  nif-port-cli convert-sse [--headparts] [--se-eye-shaders]"
+                 " <input-file-or-directory> <output-directory>\n"
               << "  nif-port-cli clone-shape <base-file> <donor-file> <shape-name> <output-file>\n"
               << "  nif-port-cli export-obj <input-file> <output-file>\n"
               << "  nif-port-cli remap-textures <input-file> <output-file>"
@@ -501,10 +556,14 @@ int main(int argc, char** argv) {
     const std::string command = argv[1];
     if (command == "inspect" && argc == 3) return inspect(fs::u8path(argv[2]));
     if (command == "convert-sse" && argc == 4) {
-        return convertSse(fs::u8path(argv[2]), fs::u8path(argv[3]), false);
+        return convertSse(fs::u8path(argv[2]), fs::u8path(argv[3]), false, false);
     }
     if (command == "convert-sse" && argc == 5 && std::string(argv[2]) == "--headparts") {
-        return convertSse(fs::u8path(argv[3]), fs::u8path(argv[4]), true);
+        return convertSse(fs::u8path(argv[3]), fs::u8path(argv[4]), true, false);
+    }
+    if (command == "convert-sse" && argc == 6 && std::string(argv[2]) == "--headparts"
+        && std::string(argv[3]) == "--se-eye-shaders") {
+        return convertSse(fs::u8path(argv[4]), fs::u8path(argv[5]), true, true);
     }
     if (command == "clone-shape" && argc == 6) {
         return cloneShape(fs::u8path(argv[2]), fs::u8path(argv[3]), argv[4], fs::u8path(argv[5]));
