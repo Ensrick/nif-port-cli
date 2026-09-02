@@ -95,12 +95,14 @@ void emitInspection(const fs::path& file, const nifly::NifFile& nif) {
     std::size_t triShapes = 0;
     std::size_t triStrips = 0;
     std::size_t bsTriShapes = 0;
+    std::size_t bsDynamicTriShapes = 0;
     std::set<std::string> textures;
 
     for (auto* shape : shapes) {
         if (dynamic_cast<nifly::NiTriShape*>(shape)) ++triShapes;
         if (dynamic_cast<nifly::NiTriStrips*>(shape)) ++triStrips;
         if (dynamic_cast<nifly::BSTriShape*>(shape)) ++bsTriShapes;
+        if (dynamic_cast<nifly::BSDynamicTriShape*>(shape)) ++bsDynamicTriShapes;
         for (std::uint32_t slot = 0; slot < 10; ++slot) {
             std::string texture;
             if (nif.GetTextureSlot(shape, texture, slot) != 0 && !texture.empty()) {
@@ -122,6 +124,7 @@ void emitInspection(const fs::path& file, const nifly::NifFile& nif) {
               << ",\"niTriShapes\":" << triShapes
               << ",\"niTriStrips\":" << triStrips
               << ",\"bsTriShapes\":" << bsTriShapes
+              << ",\"bsDynamicTriShapes\":" << bsDynamicTriShapes
               << ",\"shapeDetails\":[";
 
     bool firstShape = true;
@@ -336,7 +339,7 @@ int inspect(const fs::path& input) {
     return failures == 0 ? 0 : 3;
 }
 
-int convertSse(const fs::path& input, const fs::path& output) {
+int convertSse(const fs::path& input, const fs::path& output, bool headParts) {
     const auto files = collectNifs(input);
     if (files.empty()) {
         std::cerr << "No NIF files found: " << input << '\n';
@@ -355,6 +358,7 @@ int convertSse(const fs::path& input, const fs::path& output) {
 
         nifly::OptOptions options;
         options.targetVersion = nifly::NiVersion::getSSE();
+        options.headParts = headParts;
         const auto result = nif.OptimizeFor(options);
         sanitizeTexturePaths(nif);
         if (result.versionMismatch) {
@@ -378,6 +382,18 @@ int convertSse(const fs::path& input, const fs::path& output) {
             std::cerr << "Post-conversion validation failed: " << destination << '\n';
             ++failures;
             continue;
+        }
+        if (headParts) {
+            const auto shapes = check.GetShapes();
+            const bool allDynamic = std::all_of(shapes.cbegin(), shapes.cend(), [](auto* shape) {
+                return dynamic_cast<nifly::BSDynamicTriShape*>(shape) != nullptr;
+            });
+            if (!allDynamic) {
+                std::cerr << "Head-parts conversion did not produce only BSDynamicTriShape geometry: "
+                          << destination << '\n';
+                ++failures;
+                continue;
+            }
         }
         emitInspection(destination, check);
     }
@@ -414,7 +430,8 @@ int remapTextures(const fs::path& input,
             const auto key = normalizedTexturePath(texture);
             const auto replacement = replacements.find(key);
             if (replacement == replacements.end()) continue;
-            nif.SetTextureSlot(shape, cleanTexturePath(replacement->second), slot);
+            auto cleanedReplacement = cleanTexturePath(replacement->second);
+            nif.SetTextureSlot(shape, cleanedReplacement, slot);
             ++hits[key];
         }
     }
@@ -467,7 +484,7 @@ int remapTextures(const fs::path& input,
 void usage() {
     std::cerr << "Usage:\n"
               << "  nif-port-cli inspect <file-or-directory>\n"
-              << "  nif-port-cli convert-sse <input-file-or-directory> <output-directory>\n"
+              << "  nif-port-cli convert-sse [--headparts] <input-file-or-directory> <output-directory>\n"
               << "  nif-port-cli clone-shape <base-file> <donor-file> <shape-name> <output-file>\n"
               << "  nif-port-cli export-obj <input-file> <output-file>\n"
               << "  nif-port-cli remap-textures <input-file> <output-file>"
@@ -484,7 +501,10 @@ int main(int argc, char** argv) {
     const std::string command = argv[1];
     if (command == "inspect" && argc == 3) return inspect(fs::u8path(argv[2]));
     if (command == "convert-sse" && argc == 4) {
-        return convertSse(fs::u8path(argv[2]), fs::u8path(argv[3]));
+        return convertSse(fs::u8path(argv[2]), fs::u8path(argv[3]), false);
+    }
+    if (command == "convert-sse" && argc == 5 && std::string(argv[2]) == "--headparts") {
+        return convertSse(fs::u8path(argv[3]), fs::u8path(argv[4]), true);
     }
     if (command == "clone-shape" && argc == 6) {
         return cloneShape(fs::u8path(argv[2]), fs::u8path(argv[3]), argv[4], fs::u8path(argv[5]));

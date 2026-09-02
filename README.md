@@ -9,6 +9,15 @@ geometry before the command succeeds. Conversion also strips invalid control
 characters from embedded texture paths; one source mesh in Lost LongSwords contains
 a trailing newline in a shader texture reference.
 
+FaceGen and other head-part meshes require the engine's dynamic geometry format.
+Use the explicit head-parts mode only for head, eye, mouth, brow, hair, and FaceGen
+NIFs. The command verifies after reload that every output shape is a
+`BSDynamicTriShape`:
+
+```powershell
+nif-port-cli convert-sse --headparts le-facegen-folder se-facegen-folder
+```
+
 The tool does not contain or redistribute mod assets.
 
 `remap-textures` writes a new NIF with selected shader texture paths changed.
