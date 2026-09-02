@@ -18,6 +18,15 @@ NIFs. The command verifies after reload that every output shape is a
 nif-port-cli convert-sse --headparts le-facegen-folder se-facegen-folder
 ```
 
+For Oldrim FaceGen whose eyes must follow the Special Edition shader
+convention, add `--se-eye-shaders`. Eye-data shapes are normalized from the
+Oldrim eye shader/flag pair to the SE environment-map pair, and the saved file
+is reloaded and checked before success:
+
+```powershell
+nif-port-cli convert-sse --headparts --se-eye-shaders le-facegen-folder se-facegen-folder
+```
+
 The tool does not contain or redistribute mod assets.
 
 `remap-textures` writes a new NIF with selected shader texture paths changed.
@@ -32,7 +41,9 @@ nif-port-cli remap-textures input.nif output.nif `
 ```
 
 `inspect` reports each shape's name, vertex and triangle counts, skin bones,
-and texture paths. `clone-shape` copies one unambiguous named shape and its
+texture paths, lighting shader type and flags, and whether SSE packed eye data
+is present. The latter fields make head-part and eye conversions auditable
+without opening NifSkope. `clone-shape` copies one unambiguous named shape and its
 dependent blocks from a donor into a separate base NIF, then reloads the
 result and verifies the cloned geometry, skin-bone list, and textures. It is
 intended for narrow compatibility overlays where an independently weighted
