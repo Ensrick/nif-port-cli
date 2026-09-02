@@ -9,7 +9,43 @@ geometry before the command succeeds. Conversion also strips invalid control
 characters from embedded texture paths; one source mesh in Lost LongSwords contains
 a trailing newline in a shader texture reference.
 
+FaceGen and other head-part meshes require the engine's dynamic geometry format.
+Use the explicit head-parts mode only for head, eye, mouth, brow, hair, and FaceGen
+NIFs. The command verifies after reload that every output shape is a
+`BSDynamicTriShape`:
+
+```powershell
+nif-port-cli convert-sse --headparts le-facegen-folder se-facegen-folder
+```
+
 The tool does not contain or redistribute mod assets.
+
+`remap-textures` writes a new NIF with selected shader texture paths changed.
+It never overwrites its input or an existing output, rejects unknown blocks,
+requires every requested source path to match, and reloads the result before
+success. This makes narrow, local-only asset overlays reproducible without
+editing an installed vendor mod in place:
+
+```powershell
+nif-port-cli remap-textures input.nif output.nif `
+  'textures\shared\old.dds' 'textures\my-overlay\unique.dds'
+```
+
+`inspect` reports each shape's name, vertex and triangle counts, skin bones,
+and texture paths. `clone-shape` copies one unambiguous named shape and its
+dependent blocks from a donor into a separate base NIF, then reloads the
+result and verifies the cloned geometry, skin-bone list, and textures. It is
+intended for narrow compatibility overlays where an independently weighted
+decoration must be combined with an existing body refit:
+
+```powershell
+nif-port-cli clone-shape cbbe-outfit.nif vendor-outfit.nif `
+  'VendorOutfit:Fur' output.nif
+```
+
+`export-obj` creates a deterministic, geometry-only inspection export. It is
+not a game-asset converter; its purpose is static visual QA and exact geometry
+comparisons between an input and an owned overlay.
 
 ## Build
 
